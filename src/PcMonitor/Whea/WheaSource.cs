@@ -8,6 +8,9 @@ namespace PcMonitor.Whea;
 /// push watcher (no polling). The watcher resumes from the bookmark of the last
 /// processed record, so nothing is lost or counted twice between scan and live
 /// events, nor after the watcher is re-created.
+/// Threading: the watcher callback never takes <see cref="_lock"/> (disabling a watcher
+/// waits for a running callback; doing that under the lock would deadlock). Shared
+/// state touched by the callback is volatile; watchers are disposed outside the lock.
 /// </summary>
 public sealed class WheaSource : IDisposable
 {
@@ -17,10 +20,11 @@ public sealed class WheaSource : IDisposable
     readonly WheaAttribution _attribution;
     readonly WheaTracker _tracker;
     readonly object _lock = new();
-    EventLogWatcher? _watcher;
-    EventBookmark? _bookmark;
-    bool _broken;
-    bool _disposed;
+    EventLogWatcher? _watcher;            // guarded by _lock
+    volatile EventBookmark? _bookmark;    // written by scan and callback
+    volatile bool _broken;
+    volatile bool _disposed;
+    volatile bool _scanning;
 
     public WheaSource(WheaAttribution attribution, WheaTracker tracker)
     {
@@ -30,51 +34,78 @@ public sealed class WheaSource : IDisposable
 
     public event Action<DateTime, WheaTarget>? EventArrived;
 
-    /// <summary>Synchronous; callers run it on a background thread. Counts events since <paramref name="bootTime"/>.</summary>
+    /// <summary>
+    /// Synchronous; callers run it on a background thread, then call <see cref="Start"/>.
+    /// Counts events since <paramref name="bootTime"/>; events older than the scan itself
+    /// are history and stay out of the current CSV period.
+    /// </summary>
     public void ScanSinceBoot(DateTime bootTime)
     {
+        _scanning = true;
+        ScanGate?.Wait();   // tests only: hold the scan "in progress"
+        var scanStart = DateTime.Now;
         var since = bootTime.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
         var xpath = $"*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and TimeCreated[@SystemTime>='{since}']]]";
         try
         {
             using var reader = new EventLogReader(new EventLogQuery(LogName, PathType.LogName, xpath)) { BatchSize = 256 };
             EventBookmark? last = null;
-            for (var e = reader.ReadEvent(); e != null; e = reader.ReadEvent())
+            for (var e = reader.ReadEvent(); e != null && !_disposed; e = reader.ReadEvent())
             {
                 using (e)
                 {
                     last = e.Bookmark;
                     if (e.TimeCreated is not DateTime t || t < bootTime) continue;
-                    _tracker.Add(t, Attribute(e));
+                    _tracker.Add(t, Attribute(e), countInPeriod: t >= scanStart);
                 }
             }
-            lock (_lock) _bookmark ??= last;
+            if (_bookmark is null) _bookmark = last;
         }
         catch (EventLogException) { }
         catch (UnauthorizedAccessException) { }
+        finally
+        {
+            _scanning = false;
+        }
     }
 
-    /// <summary>Starts the live watcher, or re-creates it after an error. Idempotent otherwise.</summary>
+    /// <summary>
+    /// Starts the live watcher, or re-creates it after an error. Idempotent otherwise.
+    /// No-op while the boot scan runs: the watcher must start from the scan's bookmark.
+    /// </summary>
     public void Start()
     {
+        if (_disposed || _scanning) return;
+        EventLogWatcher? old;
         lock (_lock)
         {
-            if (_disposed || (_watcher != null && !_broken)) return;
-            DisposeWatcher();
+            if (_watcher != null && !_broken) return;
+            old = _watcher;
+            _watcher = null;
+        }
+        DisposeWatcher(old);   // outside the lock: waits for a running callback
+
+        lock (_lock)
+        {
+            if (_disposed || _scanning || _watcher != null) return;
+            EventLogWatcher? w = null;
             try
             {
                 var query = new EventLogQuery(LogName, PathType.LogName, ProviderXPath);
-                _watcher = _bookmark != null ? new EventLogWatcher(query, _bookmark, true) : new EventLogWatcher(query);
-                _watcher.EventRecordWritten += OnEvent;
-                _watcher.Enabled = true;
+                var bookmark = _bookmark;
+                w = bookmark != null ? new EventLogWatcher(query, bookmark, true) : new EventLogWatcher(query);
+                w.EventRecordWritten += OnEvent;
                 _broken = false;
+                w.Enabled = true;
+                _watcher = w;
             }
             catch (Exception)
             {
-                DisposeWatcher();
                 _broken = true;
+                old = w;
             }
         }
+        if (_watcher is null) DisposeWatcher(old);
     }
 
     public bool IsRunning
@@ -86,17 +117,13 @@ public sealed class WheaSource : IDisposable
     {
         if (args.EventException != null || args.EventRecord is null)
         {
-            lock (_lock) _broken = true;
+            _broken = true;
             return;
         }
         using var e = args.EventRecord;
         try
         {
-            var t = e.TimeCreated ?? DateTime.Now;
-            var target = Attribute(e);
-            lock (_lock) _bookmark = e.Bookmark;
-            _tracker.Add(t, target);
-            EventArrived?.Invoke(t, target);
+            Process(e.TimeCreated ?? DateTime.Now, Message(e), e.Bookmark);
         }
         catch (Exception)
         {
@@ -104,32 +131,49 @@ public sealed class WheaSource : IDisposable
         }
     }
 
-    WheaTarget Attribute(EventRecord e)
+    /// <summary>Watcher-thread handling of one live event. Never takes the source lock.</summary>
+    internal void Process(DateTime time, string? message, EventBookmark? bookmark)
     {
-        string? message = null;
-        try { message = e.FormatDescription(); } catch (EventLogException) { }
-        return _attribution.Attribute(WheaParser.TryParseBdf(message, out var bdf) ? bdf : null);
+        var target = _attribution.Attribute(WheaParser.TryParseBdf(message, out var bdf) ? bdf : null);
+        if (bookmark != null) _bookmark = bookmark;
+        _tracker.Add(time, target);
+        EventArrived?.Invoke(time, target);
     }
 
-    void DisposeWatcher()
+    internal object SyncRoot => _lock;
+
+    /// <summary>Tests only: when set, <see cref="ScanSinceBoot"/> waits on it after marking the scan in progress.</summary>
+    internal ManualResetEventSlim? ScanGate { get; set; }
+
+    static string? Message(EventRecord e)
     {
-        if (_watcher is null) return;
+        try { return e.FormatDescription(); } catch (EventLogException) { return null; }
+    }
+
+    WheaTarget Attribute(EventRecord e)
+        => _attribution.Attribute(WheaParser.TryParseBdf(Message(e), out var bdf) ? bdf : null);
+
+    void DisposeWatcher(EventLogWatcher? w)
+    {
+        if (w is null) return;
         try
         {
-            _watcher.EventRecordWritten -= OnEvent;
-            _watcher.Enabled = false;
-            _watcher.Dispose();
+            w.EventRecordWritten -= OnEvent;
+            w.Enabled = false;
+            w.Dispose();
         }
         catch (Exception) { }
-        _watcher = null;
     }
 
     public void Dispose()
     {
+        EventLogWatcher? w;
         lock (_lock)
         {
             _disposed = true;
-            DisposeWatcher();
+            w = _watcher;
+            _watcher = null;
         }
+        DisposeWatcher(w);
     }
 }

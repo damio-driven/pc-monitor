@@ -91,7 +91,6 @@ public sealed class DetailForm : Form
         {
             Dock = DockStyle.Top, AutoSize = false, Height = 40, Visible = false, UseMnemonic = false,
             BackColor = Palette.Banner, ForeColor = Palette.WindowText, Padding = new Padding(8), TextAlign = ContentAlignment.MiddleLeft,
-            Text = "Temperatura e watt CPU non disponibili: avvia PcMonitor con privilegi elevati (PcMonitor.exe --install).",
         };
 
         // Dock=Top stacks in reverse order of addition: Fill first, bottom-most Top first.
@@ -132,6 +131,12 @@ public sealed class DetailForm : Form
         if (Height > wa.Height - 24) Height = wa.Height - 24;
         Location = new Point(Math.Max(wa.Left, wa.Right - Width - 12), Math.Max(wa.Top, wa.Bottom - Height - 12));
     }
+
+    /// <summary>Null when ESIF works. Elevated but no ESIF = Intel DTT not ready (retried every minute), not a privilege problem.</summary>
+    public static string? BannerText(bool elevated, bool esifAvailable)
+        => esifAvailable ? null
+         : !elevated ? "Temperatura e watt CPU non disponibili: avvia PcMonitor con privilegi elevati (PcMonitor.exe --install)."
+         : "Sensori Intel DTT (temperatura e watt CPU) non disponibili: nuovo tentativo ogni minuto.";
 
     public static string Fmt(double? v, string unit, int decimals = 0)
         => v is double d && double.IsFinite(d)
@@ -198,7 +203,9 @@ public sealed class DetailForm : Form
     {
         var w = _monitor.Whea;
         var c = s.Cpu;
-        _banner.Visible = !s.EsifAvailable;
+        var banner = BannerText(s.Elevated, s.EsifAvailable);
+        _banner.Visible = banner != null;
+        if (banner != null) Set(_banner, banner);
 
         _cpuCard.SetChip(TrayController.CpuStateText(s.CpuState), Palette.For(s.CpuState));
         _tTemp.Set(Num(c.T1), "C", $"min {Num(s.T1Min)}  ·  max {Num(s.T1Max)}", CpuTempColor(c.T1));

@@ -79,8 +79,8 @@ public sealed class TrayController : ApplicationContext
         _cpuIcon.Text = FormatCpuTooltip(s);
         _ssdIcon.Text = FormatSsdTooltip(s.Disks, WheaToday(s));
 
-        if (_monitor.Whea.TryBeginBurst(s.Time, out int n))
-            _ssdIcon.ShowBalloonTip(10000, "PcMonitor - errori PCIe", $"{n} errori WHEA nell'ultimo minuto ({BurstSource(s)})", ToolTipIcon.Warning);
+        if (s.BurstMessage is { } burst)
+            _ssdIcon.ShowBalloonTip(10000, "PcMonitor - errori PCIe", burst, ToolTipIcon.Warning);
 
         if (++_updates % 60 == 0 && !_whea.IsRunning) _whea.Start();
         Updated?.Invoke(s);
@@ -92,15 +92,6 @@ public sealed class TrayController : ApplicationContext
     int WheaToday(MonitorSnapshot s)
         => s.Disks.Sum(d => _monitor.Whea.CountToday(d.Info.DiskNumber, WheaSide.Endpoint, s.Time)
                           + _monitor.Whea.CountToday(d.Info.DiskNumber, WheaSide.RootPort, s.Time));
-
-    string BurstSource(MonitorSnapshot s)
-    {
-        DiskInfo? last = null; DateTime lastTime = DateTime.MinValue;
-        foreach (var d in s.Disks)
-            if (_monitor.Whea.LastEvent(d.Info.DiskNumber) is DateTime t && t > lastTime) { lastTime = t; last = d.Info; }
-        if (last is null || s.Time - lastTime > TimeSpan.FromSeconds(60)) return "altri dispositivi";
-        return $"{last.Letter} bus {last.Endpoint?.Bus.ToString(CultureInfo.InvariantCulture) ?? "?"}";
-    }
 
     void ApplyIcon(NotifyIcon target, ref Icon? current, ref (string, Color, int) key, string text, Color color, IconShape shape = IconShape.Square)
     {

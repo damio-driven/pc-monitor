@@ -11,7 +11,11 @@ namespace PcMonitor;
 public sealed record MonitorSnapshot(
     DateTime Time, CpuReading Cpu, CpuState CpuState, double? T1Min, double? T1Max,
     IReadOnlyList<DiskReading> Disks, SsdState SsdState, PowerReading Power,
-    bool Elevated, bool EsifAvailable);
+    bool Elevated, bool EsifAvailable)
+{
+    /// <summary>Set on the tick a WHEA burst starts, at most once per 10 minutes: text for the notification.</summary>
+    public string? BurstMessage { get; init; }
+}
 
 public interface ISensors
 {
@@ -91,6 +95,7 @@ public sealed class Monitor : IDisposable
     IReadOnlyList<DiskReading> _lastDisks = Array.Empty<DiskReading>();
     PowerReading _lastPower = PowerReading.Empty;
     double? _t1Min, _t1Max, _t0PeriodMax;
+    bool _inBurst;
 
     public Monitor(ISensors s, WheaTracker w, EventJournal j, CsvLogger? log, Func<DateTime> clock)
     {
@@ -151,6 +156,7 @@ public sealed class Monitor : IDisposable
 
             Journal.ObserveCpu(now, cpuState, cpu.T1);
             Journal.ObserveSsd(now, ssdState, SsdDetail(ssdState, now));
+            string? burstMessage = ObserveBurst(now);
 
             var sample = new HistorySample(
                 (float)(cpu.T1 ?? double.NaN), (float)(cpu.PackageW ?? double.NaN),
@@ -159,11 +165,40 @@ public sealed class Monitor : IDisposable
 
             if (slow && _log != null) WriteCsv(now, cpu, cpuState);
 
-            snap = new MonitorSnapshot(now, cpu, cpuState, _t1Min, _t1Max, _lastDisks, ssdState, _lastPower, _elevated, esif);
+            snap = new MonitorSnapshot(now, cpu, cpuState, _t1Min, _t1Max, _lastDisks, ssdState, _lastPower, _elevated, esif)
+            {
+                BurstMessage = burstMessage,
+            };
             Last = snap;
         }
         RaiseUpdated(snap);
         return snap;
+    }
+
+    /// <summary>
+    /// Journals every WHEA burst start (>= 10 events in 60 s, with source and count); returns the
+    /// notification text only when the tracker's 10-minute notification gate opens.
+    /// </summary>
+    string? ObserveBurst(DateTime now)
+    {
+        int count = Whea.CountLast60s(now);
+        if (count < WheaTracker.BurstThreshold) { _inBurst = false; return null; }
+        if (_inBurst) return null;
+        _inBurst = true;
+        var source = BurstSource(now);
+        Journal.Add(now, $"WHEA {source}: {count.ToString(CultureInfo.InvariantCulture)} eventi in 1 min");
+        return Whea.TryBeginBurst(now, out int n)
+            ? $"{n.ToString(CultureInfo.InvariantCulture)} errori WHEA nell'ultimo minuto ({source})"
+            : null;
+    }
+
+    string BurstSource(DateTime now)
+    {
+        DiskInfo? last = null; DateTime lastTime = DateTime.MinValue;
+        foreach (var d in _lastDisks)
+            if (Whea.LastEvent(d.Info.DiskNumber) is DateTime t && t > lastTime) { lastTime = t; last = d.Info; }
+        if (last is null || now - lastTime > WheaTracker.BurstWindow) return "altri dispositivi";
+        return $"bus {last.Endpoint?.Bus.ToString(CultureInfo.InvariantCulture) ?? "?"} ({last.Letter})";
     }
 
     void RaiseUpdated(MonitorSnapshot snap)

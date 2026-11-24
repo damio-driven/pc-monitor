@@ -20,22 +20,45 @@ public sealed class CpuSensor : IDisposable
 
     static readonly IReadOnlyDictionary<string, double> Empty = new Dictionary<string, double>();
 
-    readonly PdhQuery? _esif;
-    readonly PdhQuery? _proc;
-    readonly PdhQuery? _tz;
+    /// <summary>Reads (about one per second) between attempts to create a missing query.</summary>
+    public const int DefaultRetryEveryReads = 60;
 
-    public CpuSensor()
+    readonly Func<string[], PdhQuery?> _factory;
+    readonly int _retryEvery;
+    PdhQuery? _esif;
+    PdhQuery? _proc;
+    PdhQuery? _tz;
+    int _reads;
+
+    public CpuSensor() : this(PdhQuery.TryCreate, DefaultRetryEveryReads) { }
+
+    /// <summary>
+    /// A query that cannot be created (e.g. Intel DTT not started yet when the logon task runs)
+    /// is retried every <paramref name="retryEveryReads"/> reads instead of staying missing all session.
+    /// </summary>
+    internal CpuSensor(Func<string[], PdhQuery?> factory, int retryEveryReads)
     {
-        _esif = PdhQuery.TryCreate(EsifTemp, EsifRapl);
-        _proc = PdhQuery.TryCreate(Perf, Utility, Limit);
-        _tz = PdhQuery.TryCreate(TzTemp, TzPassive);
+        _factory = factory;
+        _retryEvery = Math.Max(1, retryEveryReads);
+        _esif = _factory(new[] { EsifTemp, EsifRapl });
+        _proc = _factory(new[] { Perf, Utility, Limit });
+        _tz = _factory(new[] { TzTemp, TzPassive });
     }
 
     public bool EsifAvailable => _esif != null;
 
+    void RetryMissing()
+    {
+        if (++_reads % _retryEvery != 0) return;
+        _esif ??= _factory(new[] { EsifTemp, EsifRapl });
+        _proc ??= _factory(new[] { Perf, Utility, Limit });
+        _tz ??= _factory(new[] { TzTemp, TzPassive });
+    }
+
     /// <summary>Rate counters need two collects: the first call may return nulls.</summary>
     public CpuReading Read()
     {
+        RetryMissing();
         bool esifOk = _esif?.Collect() == true;
         bool procOk = _proc?.Collect() == true;
         bool tzOk = _tz?.Collect() == true;

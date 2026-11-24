@@ -36,7 +36,11 @@ public sealed class WheaTracker
 
     public DateTime BootTime { get; }
 
-    public void Add(DateTime time, WheaTarget t)
+    /// <summary>
+    /// Records one event. <paramref name="countInPeriod"/> = false for events replayed by the boot
+    /// scan: they belong to "since boot" / "today", not to the current CSV period.
+    /// </summary>
+    public void Add(DateTime time, WheaTarget t, bool countInPeriod = true)
     {
         var key = (t.DiskNumber, t.Side);
         lock (_lock)
@@ -57,11 +61,11 @@ public sealed class WheaTracker
 
             if (t.DiskNumber is int disk)
             {
-                _period[(disk, t.Side)] = _period.GetValueOrDefault((disk, t.Side)) + 1;
+                if (countInPeriod) _period[(disk, t.Side)] = _period.GetValueOrDefault((disk, t.Side)) + 1;
                 if (!_lastByDisk.TryGetValue(disk, out var last) || time > last) _lastByDisk[disk] = time;
                 if (_lastDiskEvent is null || time > _lastDiskEvent) _lastDiskEvent = time;
             }
-            else
+            else if (countInPeriod)
             {
                 _periodOther++;
             }
@@ -94,15 +98,28 @@ public sealed class WheaTracker
         lock (_lock) return _lastDiskEvent is DateTime last && now - last <= ActiveWindow;
     }
 
+    /// <summary>Events of any kind in the last 60 s.</summary>
+    public int CountLast60s(DateTime now)
+    {
+        lock (_lock) return CountLast60sLocked(now);
+    }
+
+    int CountLast60sLocked(DateTime now)
+    {
+        long nowSec = now.Ticks / TimeSpan.TicksPerSecond;
+        long fromSec = nowSec - (long)BurstWindow.TotalSeconds;
+        int n = 0;
+        for (int i = 0; i < SecondSlots; i++)
+            if (_slotSecond[i] >= fromSec && _slotSecond[i] <= nowSec) n += _slotCount[i];
+        return n;
+    }
+
+    /// <summary>True at most once per 10 minutes when a burst is under way (notification gate).</summary>
     public bool TryBeginBurst(DateTime now, out int countLast60s)
     {
         lock (_lock)
         {
-            long nowSec = now.Ticks / TimeSpan.TicksPerSecond;
-            long fromSec = nowSec - (long)BurstWindow.TotalSeconds;
-            int n = 0;
-            for (int i = 0; i < SecondSlots; i++)
-                if (_slotSecond[i] >= fromSec && _slotSecond[i] <= nowSec) n += _slotCount[i];
+            int n = CountLast60sLocked(now);
             countLast60s = n;
             if (n < BurstThreshold) return false;
             if (_lastBurst is DateTime lb && now - lb < BurstCooldown) return false;
