@@ -1,6 +1,9 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
-using System.Security.Principal;
+using PcMonitor.Logging;
+using PcMonitor.Logic;
+using PcMonitor.UI;
+using PcMonitor.Whea;
 using PcMonitor.Model;
 using PcMonitor.Sensors;
 
@@ -13,13 +16,39 @@ static partial class Program
     {
         if (args.Length > 0 && args[0].Equals("--probe", StringComparison.OrdinalIgnoreCase))
             return Probe();
-        return 0;
+        return RunTray();
     }
 
-    public static bool IsElevated()
+    static int RunTray()
     {
-        using var id = WindowsIdentity.GetCurrent();
-        return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, _) => { /* never close the app on a UI exception */ };
+        ApplicationConfiguration.Initialize();
+
+        try
+        {
+            Directory.CreateDirectory(AppPaths.LogDirectory);
+            CsvLogger.Cleanup(AppPaths.LogDirectory, DateTime.Today);
+        }
+        catch (Exception) { }
+
+        using var sensors = new RealSensors();
+        var boot = AppPaths.BootTime();
+        var tracker = new WheaTracker(boot);
+        using var whea = new WheaSource(new WheaAttribution(sensors.Disks), tracker);
+        var journal = new EventJournal();
+        using var log = new CsvLogger(AppPaths.LogDirectory);
+        using var monitor = new Monitor(sensors, tracker, journal, log, () => DateTime.Now);
+        using var tray = new TrayController(monitor, whea);
+
+        journal.Add(DateTime.Now, "avvio");
+        // Scan then start the watcher on the same background task: the watcher resumes
+        // from the scan's bookmark, so no event is lost or counted twice.
+        Task.Run(() => { whea.ScanSinceBoot(boot); whea.Start(); });
+        monitor.Start();
+        Application.Run(tray);
+        journal.Add(DateTime.Now, "uscita");
+        return 0;
     }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
@@ -47,7 +76,7 @@ static partial class Program
         AttachParentConsoleIfNeeded();
         var o = Console.Out;
         o.WriteLine();
-        o.WriteLine($"PcMonitor probe  elevated={IsElevated()}  {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        o.WriteLine($"PcMonitor probe  elevated={AppPaths.IsElevated()}  {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
 
         var topology = DiskTopology.Discover();
         using var cpu = new CpuSensor();
@@ -76,13 +105,13 @@ static partial class Program
         foreach (var d in diskReadings)
             o.WriteLine($"{d.Info.Letter} disk {d.Info.DiskNumber} {d.Info.Model} endpoint={d.Info.Endpoint?.ToString() ?? "null"} rootport={d.Info.RootPort?.ToString() ?? "null"} temp={F(d.TempC)} warn={F(d.WarnC)} crit={F(d.CritC)} read={F(d.ReadMBs)} write={F(d.WriteMBs)} lat={F(d.LatencyMs)}");
         var boot = DateTime.Now - TimeSpan.FromMilliseconds(Environment.TickCount64);
-        var tracker = new Whea.WheaTracker(boot);
-        using (var whea = new Whea.WheaSource(new Whea.WheaAttribution(topology), tracker))
+        var tracker = new WheaTracker(boot);
+        using (var whea = new WheaSource(new WheaAttribution(topology), tracker))
             whea.ScanSinceBoot(boot);
         o.WriteLine($"WHEA since boot ({boot:yyyy-MM-dd HH:mm:ss}):");
         foreach (var d in topology)
-            o.WriteLine($"  {d.Letter} disk {d.DiskNumber}: endpoint={tracker.CountSinceBoot(d.DiskNumber, Whea.WheaSide.Endpoint)} rootport={tracker.CountSinceBoot(d.DiskNumber, Whea.WheaSide.RootPort)}");
-        o.WriteLine($"  other={tracker.CountSinceBoot(null, Whea.WheaSide.Other)}");
+            o.WriteLine($"  {d.Letter} disk {d.DiskNumber}: endpoint={tracker.CountSinceBoot(d.DiskNumber, WheaSide.Endpoint)} rootport={tracker.CountSinceBoot(d.DiskNumber, WheaSide.RootPort)}");
+        o.WriteLine($"  other={tracker.CountSinceBoot(null, WheaSide.Other)}");
         o.WriteLine($"Power: onAc={power.OnAc?.ToString() ?? "null"} battery={power.BatteryPct?.ToString(CultureInfo.InvariantCulture) ?? "null"}% rate={F(power.RateW)} W");
         o.Flush();
         return 0;
