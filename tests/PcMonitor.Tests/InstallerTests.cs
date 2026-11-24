@@ -53,6 +53,54 @@ public class InstallerTests
         Assert.Contains(rules, r => r.IdentityReference.Equals(admins) && r.FileSystemRights.HasFlag(System.Security.AccessControl.FileSystemRights.FullControl));
     }
 
+    static string NewTempPath() => Path.Combine(Path.GetTempPath(), "PcMonitorTests", Guid.NewGuid().ToString("N"));
+
+    // Security review: a folder pre-created by a non-elevated process (planted files, a hardlinked
+    // PcMonitor.exe) must be emptied and protected before the exe is copied.
+    [Fact] public void Prepare_existing_folder_removes_planted_content_and_protects_it()
+    {
+        var dir = NewTempPath(); Directory.CreateDirectory(Path.Combine(dir, "sub"));
+        var outside = NewTempPath() + ".bin"; Directory.CreateDirectory(Path.GetDirectoryName(outside)!); File.WriteAllText(outside, "attacker");
+        File.WriteAllText(Path.Combine(dir, "planted.dll"), "x");
+        Assert.True(CreateHardLink(Path.Combine(dir, "PcMonitor.exe"), outside, IntPtr.Zero));
+        try
+        {
+            TaskInstaller.PrepareInstallDirectory(dir);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(dir));
+            Assert.Equal("attacker", File.ReadAllText(outside));                 // the linked file was not written through
+            Assert.True(new DirectoryInfo(dir).GetAccessControl().AreAccessRulesProtected);
+        }
+        finally { try { Directory.Delete(dir, true); File.Delete(outside); } catch (Exception) { } }
+    }
+
+    [Fact] public void Prepare_new_folder_is_created_protected()
+    {
+        var dir = NewTempPath();
+        try
+        {
+            TaskInstaller.PrepareInstallDirectory(dir);
+            Assert.True(new DirectoryInfo(dir).GetAccessControl().AreAccessRulesProtected);
+        }
+        finally { try { Directory.Delete(dir, true); } catch (Exception) { } }
+    }
+
+    [Fact] public void Prepare_refuses_a_junction()
+    {
+        var target = NewTempPath(); Directory.CreateDirectory(target);
+        var link = NewTempPath();
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!.WaitForExit();
+        try
+        {
+            Assert.True(Directory.Exists(link));
+            Assert.Throws<IOException>(() => TaskInstaller.PrepareInstallDirectory(link));
+            Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected);   // target untouched
+        }
+        finally { try { Directory.Delete(link); Directory.Delete(target, true); } catch (Exception) { } }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateHardLink(string newFile, string existingFile, IntPtr security);
+
     // Security review: the task XML is registered from memory (COM), no temp file another process could swap.
     [Fact] public void Task_xml_is_registered_without_temp_file()
     {
