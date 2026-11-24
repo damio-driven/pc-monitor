@@ -75,6 +75,14 @@ static partial class Program
         }
         foreach (var d in diskReadings)
             o.WriteLine($"{d.Info.Letter} disk {d.Info.DiskNumber} {d.Info.Model} endpoint={d.Info.Endpoint?.ToString() ?? "null"} rootport={d.Info.RootPort?.ToString() ?? "null"} temp={F(d.TempC)} warn={F(d.WarnC)} crit={F(d.CritC)} read={F(d.ReadMBs)} write={F(d.WriteMBs)} lat={F(d.LatencyMs)}");
+        var boot = DateTime.Now - TimeSpan.FromMilliseconds(Environment.TickCount64);
+        var tracker = new Whea.WheaTracker(boot);
+        using (var whea = new Whea.WheaSource(new Whea.WheaAttribution(topology), tracker))
+            whea.ScanSinceBoot(boot);
+        o.WriteLine($"WHEA since boot ({boot:yyyy-MM-dd HH:mm:ss}):");
+        foreach (var d in topology)
+            o.WriteLine($"  {d.Letter} disk {d.DiskNumber}: endpoint={tracker.CountSinceBoot(d.DiskNumber, Whea.WheaSide.Endpoint)} rootport={tracker.CountSinceBoot(d.DiskNumber, Whea.WheaSide.RootPort)}");
+        o.WriteLine($"  other={tracker.CountSinceBoot(null, Whea.WheaSide.Other)}");
         o.WriteLine($"Power: onAc={power.OnAc?.ToString() ?? "null"} battery={power.BatteryPct?.ToString(CultureInfo.InvariantCulture) ?? "null"}% rate={F(power.RateW)} W");
         o.Flush();
         return 0;
