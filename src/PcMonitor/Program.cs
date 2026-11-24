@@ -14,12 +14,41 @@ static partial class Program
     [STAThread]
     static int Main(string[] args)
     {
-        if (args.Length > 0 && args[0].Equals("--probe", StringComparison.OrdinalIgnoreCase))
-            return Probe();
-        return RunTray();
+        var cmd = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        switch (cmd)
+        {
+            case "--probe": return Probe();
+            case "--install": return Install.TaskInstaller.Install(Report);
+            case "--uninstall": return Install.TaskInstaller.Uninstall(Report);
+        }
+
+        using var instance = SingleInstance.TryAcquire();
+        if (instance is null)
+        {
+            SingleInstance.SignalShow();   // first instance opens its window
+            return 0;
+        }
+        return RunTray(instance);
     }
 
-    static int RunTray()
+    /// <summary>Console when started from a terminal; a message box otherwise.</summary>
+    static void Report(string message)
+    {
+        AttachParentConsoleIfNeeded();
+        try
+        {
+            if (GetStdHandle(-11) is var h && h != IntPtr.Zero && h != new IntPtr(-1))
+            {
+                Console.WriteLine();
+                Console.WriteLine(message);
+                return;
+            }
+        }
+        catch (IOException) { }
+        MessageBox.Show(message, "PcMonitor", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    static int RunTray(SingleInstance instance)
     {
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, _) => { /* never close the app on a UI exception */ };
@@ -40,6 +69,7 @@ static partial class Program
         using var log = new CsvLogger(AppPaths.LogDirectory);
         using var monitor = new Monitor(sensors, tracker, journal, log, () => DateTime.Now);
         using var tray = new TrayController(monitor, whea);
+        instance.OnShowRequested(tray.OpenDetailFromAnyThread);
 
         journal.Add(DateTime.Now, "avvio");
         // Scan then start the watcher on the same background task: the watcher resumes

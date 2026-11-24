@@ -18,6 +18,14 @@ public sealed class DetailForm : Form
     static readonly Color SeriesD = Color.FromArgb(0xFF, 0xB7, 0x4D);
     static readonly Color SeriesC = Color.FromArgb(0x4D, 0xB6, 0xAC);
 
+    // Shared for the process lifetime: a new Font/Icon per window would leak one HFONT and
+    // one HICON (+2 bitmaps) per open until the finalizer runs.
+    static readonly Font FormFont = new("Segoe UI", 9F);
+    static readonly Lazy<Icon?> AppIcon = new(() =>
+    {
+        try { return Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { return null; }
+    });
+
     readonly Monitor _monitor;
     readonly Label _banner, _zones, _power;
     readonly Card _cpuCard, _ssdCard, _bottomCard;
@@ -25,7 +33,7 @@ public sealed class DetailForm : Form
     readonly Panel _diskHost;
     readonly List<DiskRow> _diskRows = new();
     readonly ChartControl _cpuChart, _ssdChart;
-    readonly ListBox _events;
+    readonly EventsView _events;
     bool _subscribed;
     int _journalCount = -1;
     JournalEntry? _journalTop;
@@ -37,14 +45,14 @@ public sealed class DetailForm : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96F, 96F);
-        Font = new Font("Segoe UI", 9F);
+        Font = FormFont;
         BackColor = Palette.WindowBack;
         ForeColor = Palette.WindowText;
         ClientSize = new Size(820, 880);
         MinimumSize = new Size(700, 600);
         Padding = new Padding(12);
         DoubleBuffered = true;
-        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
+        if (AppIcon.Value is { } icon) Icon = icon;
 
         // --- CPU card: four tiles, platform sensors line, chart.
         _tTemp = new Tile("Temperatura");
@@ -72,12 +80,7 @@ public sealed class DetailForm : Form
 
         // --- Power and events.
         _power = new Label { Dock = DockStyle.Top, Height = 26, ForeColor = Palette.WindowText, BackColor = Palette.PanelBack, UseMnemonic = false };
-        _events = new ListBox
-        {
-            Dock = DockStyle.Fill, BackColor = Palette.PanelBack, ForeColor = Palette.WindowText, BorderStyle = BorderStyle.None,
-            IntegralHeight = false, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 20, SelectionMode = SelectionMode.None,
-        };
-        _events.DrawItem += DrawEvent;
+        _events = new EventsView { Dock = DockStyle.Fill };
         var eventsTitle = new Label { Dock = DockStyle.Top, Height = 24, Text = "Eventi (sessione)", ForeColor = Palette.MutedText, BackColor = Palette.PanelBack };
         _bottomCard = new Card("Alimentazione") { Dock = DockStyle.Fill };
         _bottomCard.Controls.Add(_events);
@@ -262,19 +265,7 @@ public sealed class DetailForm : Form
         if (entries.Count == _journalCount && ReferenceEquals(top, _journalTop)) return;
         _journalCount = entries.Count;
         _journalTop = top;
-        _events.BeginUpdate();
-        _events.Items.Clear();
-        foreach (var e in entries) _events.Items.Add(e);
-        _events.EndUpdate();
-    }
-
-    void DrawEvent(object? sender, DrawItemEventArgs e)
-    {
-        using (var back = new SolidBrush(Palette.PanelBack)) e.Graphics.FillRectangle(back, e.Bounds);
-        if (e.Index < 0 || e.Index >= _events.Items.Count || _events.Items[e.Index] is not JournalEntry j) return;
-        var time = j.Time.ToString("HH:mm:ss", It);
-        TextRenderer.DrawText(e.Graphics, time, _events.Font, new Point(e.Bounds.Left + 2, e.Bounds.Top + 2), Palette.MutedText);
-        TextRenderer.DrawText(e.Graphics, j.Text, _events.Font, new Point(e.Bounds.Left + 72, e.Bounds.Top + 2), Palette.WindowText);
+        _events.SetEntries(entries);
     }
 
     static void Set(Label l, string text)

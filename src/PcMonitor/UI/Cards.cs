@@ -201,3 +201,58 @@ internal sealed class DiskRow : Control
         base.Dispose(disposing);
     }
 }
+
+/// <summary>
+/// Journal list (newest first), painted by hand with mouse-wheel scrolling. Replaces a
+/// native ListBox, which leaked one GDI object per window open/close.
+/// </summary>
+internal sealed class EventsView : Control
+{
+    IReadOnlyList<PcMonitor.Logic.JournalEntry> _entries = Array.Empty<PcMonitor.Logic.JournalEntry>();
+    int _offset;
+
+    public EventsView()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+        BackColor = Palette.PanelBack;
+        ForeColor = Palette.WindowText;
+    }
+
+    int LineHeight => Font.Height + 4;
+    int VisibleLines => Math.Max(1, Height / LineHeight);
+
+    public void SetEntries(IReadOnlyList<PcMonitor.Logic.JournalEntry> entries)
+    {
+        _entries = entries;
+        _offset = Math.Clamp(_offset, 0, Math.Max(0, _entries.Count - VisibleLines));
+        Invalidate();
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); Focus(); }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        int next = Math.Clamp(_offset - Math.Sign(e.Delta) * 3, 0, Math.Max(0, _entries.Count - VisibleLines));
+        if (next != _offset) { _offset = next; Invalidate(); }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.Clear(BackColor);
+        int y = 0;
+        for (int i = _offset; i < _entries.Count && y < Height; i++, y += LineHeight)
+        {
+            var j = _entries[i];
+            TextRenderer.DrawText(e.Graphics, j.Time.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture), Font, new Point(2, y + 2), Palette.MutedText);
+            TextRenderer.DrawText(e.Graphics, j.Text, Font, new Point(72, y + 2), ForeColor);
+        }
+        if (_entries.Count > VisibleLines)
+        {
+            using var b = new SolidBrush(Palette.Grid);
+            float h = Math.Max(12f, Height * (float)VisibleLines / _entries.Count);
+            float top = (Height - h) * _offset / Math.Max(1, _entries.Count - VisibleLines);
+            e.Graphics.FillRectangle(b, Width - 4, top, 3, h);
+        }
+    }
+}
