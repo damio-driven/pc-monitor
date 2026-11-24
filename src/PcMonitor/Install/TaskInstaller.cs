@@ -85,49 +85,57 @@ public static class TaskInstaller
     }
 
     /// <summary>
-    /// Makes <paramref name="path"/> a protected, empty folder owned by Administrators, safe to copy the
-    /// elevated exe into. A missing folder is created with the protected ACL in one step. An existing one
-    /// may have been planted by a non-elevated process (the parent grants Authenticated Users Modify):
-    /// a reparse point (junction/symlink) is refused, otherwise the ACL is applied first (locking the
-    /// planter out), the folder re-checked, and every entry deleted (a planted hardlink is unlinked,
-    /// never written through). <paramref name="keep"/> = a file not to delete (the running exe).
+    /// Makes <paramref name="path"/> a protected folder (owner Administrators, protected ACL), with no
+    /// files left in it, safe to copy the elevated exe into. Untrusted content is never modified:
+    /// an existing entry that is not a folder created by a previous install (wrong owner, unprotected
+    /// ACL, write access for non-admins, or a junction/symlink/file) is renamed aside - a rename acts
+    /// on the link itself and follows nothing - and a fresh folder is created with the protected ACL
+    /// in one step. A trusted folder (only admins could have written into it) keeps its place and
+    /// loses its top-level files. Returns the path the untrusted entry was moved to, or null.
     /// </summary>
-    public static void PrepareInstallDirectory(string path, string? keep = null)
+    public static string? PrepareInstallDirectory(string path)
     {
-        var sec = BuildProtectedDirectorySecurity();
+        string? aside = null;
         var dir = new DirectoryInfo(path);
-        if (!dir.Exists && !File.Exists(path)) dir.Create(sec);
-        dir.Refresh();
-        EnsurePlainDirectory(dir);
-        dir.SetAccessControl(sec);
-        dir.Refresh();
-        EnsurePlainDirectory(dir);
-        var owner = dir.GetAccessControl().GetOwner(typeof(SecurityIdentifier));
-        if (owner is not SecurityIdentifier sid ||
-            !(sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid) || sid.IsWellKnown(WellKnownSidType.LocalSystemSid)))
-            throw new IOException($"{path}: proprietario inatteso {owner}");
-
-        foreach (var entry in dir.EnumerateFileSystemInfos())
+        if (dir.Exists || File.Exists(path))
         {
-            if (keep != null && string.Equals(entry.FullName, Path.GetFullPath(keep), StringComparison.OrdinalIgnoreCase)) continue;
-            if (entry is DirectoryInfo d)
+            if (IsTrustedInstallDirectory(dir))
             {
-                if (d.Attributes.HasFlag(FileAttributes.ReparsePoint)) d.Delete();   // removes the link, not its target
-                else d.Delete(recursive: true);
+                foreach (var f in dir.EnumerateFiles())
+                {
+                    f.Attributes = FileAttributes.Normal;
+                    f.Delete();
+                }
             }
             else
             {
-                entry.Attributes = FileAttributes.Normal;
-                entry.Delete();
+                aside = $"{path}.old-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
+                if (dir.Exists) Directory.Move(path, aside); else File.Move(path, aside);
             }
         }
+        dir = new DirectoryInfo(path);
+        if (!dir.Exists) dir.Create(BuildProtectedDirectorySecurity());
+        dir.Refresh();
+        if (!IsTrustedInstallDirectory(dir)) throw new IOException($"{path}: cartella d'installazione non protetta");
+        return aside;
     }
 
-    static void EnsurePlainDirectory(DirectoryInfo dir)
+    /// <summary>A real folder owned by Administrators/SYSTEM, protected ACL, no write access for anyone else.</summary>
+    static bool IsTrustedInstallDirectory(DirectoryInfo dir)
     {
-        if (!dir.Exists) throw new IOException($"{dir.FullName}: non e' una cartella");
-        if (dir.Attributes.HasFlag(FileAttributes.ReparsePoint))
-            throw new IOException($"{dir.FullName} e' un collegamento (junction/symlink): installazione rifiutata");
+        if (!dir.Exists || dir.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+        var acl = dir.GetAccessControl();
+        if (!acl.AreAccessRulesProtected) return false;
+        static bool Privileged(IdentityReference? id) => id is SecurityIdentifier s &&
+            (s.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid) || s.IsWellKnown(WellKnownSidType.LocalSystemSid));
+        if (!Privileged(acl.GetOwner(typeof(SecurityIdentifier)))) return false;
+        const FileSystemRights write = FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.WriteExtendedAttributes |
+                                       FileSystemRights.WriteAttributes | FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.Delete |
+                                       FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+        foreach (FileSystemAccessRule r in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            if (r.AccessControlType == AccessControlType.Allow && !Privileged(r.IdentityReference) && (r.FileSystemRights & write) != 0)
+                return false;
+        return true;
     }
 
     /// <summary>
@@ -169,9 +177,14 @@ public static class TaskInstaller
         var target = InstalledExe;
         try
         {
-            bool selfInstall = string.Equals(Path.GetFullPath(source), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase);
-            PrepareInstallDirectory(InstallDirectory, keep: selfInstall ? target : null);
-            if (!selfInstall) File.Copy(source, target, overwrite: false);   // folder is empty and protected
+            if (string.Equals(Path.GetDirectoryName(Path.GetFullPath(source)), Path.GetFullPath(InstallDirectory), StringComparison.OrdinalIgnoreCase))
+            {
+                report("Avvia --install dall'exe pubblicato (cartella publish), non da quello installato.");
+                return 1;
+            }
+            var aside = PrepareInstallDirectory(InstallDirectory);
+            if (aside != null) report($"Attenzione: {InstallDirectory} esisteva con permessi non sicuri ed e' stata spostata in {aside} (non modificata): controllala e cancellala.");
+            File.Copy(source, target, overwrite: false);   // folder is protected and has no files
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

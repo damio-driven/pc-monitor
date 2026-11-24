@@ -55,9 +55,15 @@ public class InstallerTests
 
     static string NewTempPath() => Path.Combine(Path.GetTempPath(), "PcMonitorTests", Guid.NewGuid().ToString("N"));
 
+    static void CleanupWithAside(string dir)
+    {
+        foreach (var d in Directory.EnumerateFileSystemEntries(Path.GetDirectoryName(dir)!, Path.GetFileName(dir) + "*"))
+            try { if (new DirectoryInfo(d).Attributes.HasFlag(FileAttributes.ReparsePoint)) Directory.Delete(d); else Directory.Delete(d, true); } catch (Exception) { }
+    }
+
     // Security review: a folder pre-created by a non-elevated process (planted files, a hardlinked
-    // PcMonitor.exe) must be emptied and protected before the exe is copied.
-    [Fact] public void Prepare_existing_folder_removes_planted_content_and_protects_it()
+    // PcMonitor.exe) is never modified in place: it is moved aside and a fresh protected folder is created.
+    [Fact] public void Prepare_untrusted_existing_folder_is_moved_aside_untouched()
     {
         var dir = NewTempPath(); Directory.CreateDirectory(Path.Combine(dir, "sub"));
         var outside = NewTempPath() + ".bin"; Directory.CreateDirectory(Path.GetDirectoryName(outside)!); File.WriteAllText(outside, "attacker");
@@ -65,12 +71,28 @@ public class InstallerTests
         Assert.True(CreateHardLink(Path.Combine(dir, "PcMonitor.exe"), outside, IntPtr.Zero));
         try
         {
-            TaskInstaller.PrepareInstallDirectory(dir);
+            var aside = TaskInstaller.PrepareInstallDirectory(dir);
+            Assert.NotNull(aside);
             Assert.Empty(Directory.EnumerateFileSystemEntries(dir));
-            Assert.Equal("attacker", File.ReadAllText(outside));                 // the linked file was not written through
             Assert.True(new DirectoryInfo(dir).GetAccessControl().AreAccessRulesProtected);
+            Assert.True(File.Exists(Path.Combine(aside!, "planted.dll")));              // planted content kept, not deleted
+            Assert.False(new DirectoryInfo(aside!).GetAccessControl().AreAccessRulesProtected);   // and no ACL pushed onto it
+            Assert.Equal("attacker", File.ReadAllText(outside));
         }
-        finally { try { Directory.Delete(dir, true); File.Delete(outside); } catch (Exception) { } }
+        finally { CleanupWithAside(dir); try { File.Delete(outside); } catch (Exception) { } }
+    }
+
+    [Fact] public void Prepare_trusted_existing_folder_is_kept_and_emptied_of_files()
+    {
+        var dir = NewTempPath();
+        try
+        {
+            TaskInstaller.PrepareInstallDirectory(dir);                     // as a previous install
+            File.WriteAllText(Path.Combine(dir, "PcMonitor.exe"), "old");
+            Assert.Null(TaskInstaller.PrepareInstallDirectory(dir));       // trusted: not moved aside
+            Assert.Empty(Directory.EnumerateFileSystemEntries(dir));
+        }
+        finally { CleanupWithAside(dir); }
     }
 
     [Fact] public void Prepare_new_folder_is_created_protected()
@@ -84,18 +106,20 @@ public class InstallerTests
         finally { try { Directory.Delete(dir, true); } catch (Exception) { } }
     }
 
-    [Fact] public void Prepare_refuses_a_junction()
+    [Fact] public void Prepare_moves_a_junction_aside_without_touching_its_target()
     {
-        var target = NewTempPath(); Directory.CreateDirectory(target);
+        var target = NewTempPath(); Directory.CreateDirectory(target); File.WriteAllText(Path.Combine(target, "keep.txt"), "x");
         var link = NewTempPath();
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })!.WaitForExit();
         try
         {
             Assert.True(Directory.Exists(link));
-            Assert.Throws<IOException>(() => TaskInstaller.PrepareInstallDirectory(link));
-            Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected);   // target untouched
+            TaskInstaller.PrepareInstallDirectory(link);
+            Assert.False(new DirectoryInfo(link).Attributes.HasFlag(FileAttributes.ReparsePoint));   // fresh real folder
+            Assert.True(File.Exists(Path.Combine(target, "keep.txt")));                               // target untouched
+            Assert.False(new DirectoryInfo(target).GetAccessControl().AreAccessRulesProtected);
         }
-        finally { try { Directory.Delete(link); Directory.Delete(target, true); } catch (Exception) { } }
+        finally { CleanupWithAside(link); try { Directory.Delete(target, true); } catch (Exception) { } }
     }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
