@@ -41,7 +41,7 @@ public sealed class TrayController : ApplicationContext
 
         _cpuIcon = NewIcon("CPU");
         _ssdIcon = NewIcon("SSD");
-        ApplyIcon(_cpuIcon, ref _cpuImage, ref _cpuKey, "--", Palette.Unknown);
+        ApplyIcon(_cpuIcon, ref _cpuImage, ref _cpuKey, "--", Palette.Unknown, IconShape.Chip);
         ApplyIcon(_ssdIcon, ref _ssdImage, ref _ssdKey, "--", Palette.Unknown);
         _ssdIcon.Visible = true;   // shown first: Windows lists newer icons to the left, CPU ends up left of SSD
         _cpuIcon.Visible = true;
@@ -72,7 +72,7 @@ public sealed class TrayController : ApplicationContext
 
     void Render(MonitorSnapshot s)
     {
-        ApplyIcon(_cpuIcon, ref _cpuImage, ref _cpuKey, IconText(s.Cpu.T1), Palette.For(s.CpuState));
+        ApplyIcon(_cpuIcon, ref _cpuImage, ref _cpuKey, IconText(s.Cpu.T1), Palette.For(s.CpuState), IconShape.Chip);
         double? maxDisk = s.Disks.Where(d => d.TempC is not null).Select(d => d.TempC).DefaultIfEmpty(null).Max();
         ApplyIcon(_ssdIcon, ref _ssdImage, ref _ssdKey, IconText(maxDisk), Palette.For(s.SsdState));
 
@@ -102,11 +102,11 @@ public sealed class TrayController : ApplicationContext
         return $"{last.Letter} bus {last.Endpoint?.Bus.ToString(CultureInfo.InvariantCulture) ?? "?"}";
     }
 
-    void ApplyIcon(NotifyIcon target, ref Icon? current, ref (string, Color, int) key, string text, Color color)
+    void ApplyIcon(NotifyIcon target, ref Icon? current, ref (string, Color, int) key, string text, Color color, IconShape shape = IconShape.Square)
     {
         var k = (text, color, _iconSize);
         if (current != null && key == k) return;
-        var next = IconRenderer.Render(text, color, _iconSize);
+        var next = IconRenderer.Render(text, color, _iconSize, shape);
         target.Icon = next;
         current?.Dispose();   // destroys the previous HICON
         current = next;
@@ -147,10 +147,26 @@ public sealed class TrayController : ApplicationContext
 
     static string Truncate(string s) => s.Length <= MaxTooltip ? s : s[..(MaxTooltip - 3)] + "...";
 
+    DetailForm? _form;
+
+    /// <summary>Opens the detail window, or brings the existing one to front. UI thread only.</summary>
     public void OpenDetail()
     {
-        // Detail window arrives in Task 9.
+        if (_exiting) return;
+        if (_form is { IsDisposed: false })
+        {
+            if (_form.WindowState == FormWindowState.Minimized) _form.WindowState = FormWindowState.Normal;
+            _form.Activate();
+            return;
+        }
+        _form = new DetailForm(_monitor);
+        _form.FormClosed += (_, _) => _form = null;
+        _form.Show();
+        _form.Activate();
     }
+
+    /// <summary>Thread-safe entry point (used by the second-instance signal).</summary>
+    public void OpenDetailFromAnyThread() => _ui.Post(_ => OpenDetail(), null);
 
     static void OpenLogFolder()
     {
@@ -172,6 +188,7 @@ public sealed class TrayController : ApplicationContext
     protected override void ExitThreadCore()
     {
         _exiting = true;
+        _form?.Close();
         _monitor.Updated -= OnUpdated;
         SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;

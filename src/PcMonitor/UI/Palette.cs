@@ -14,10 +14,11 @@ public static class Palette
     public static readonly Color Text = Color.White;
 
     // Dark theme for the detail window.
-    public static readonly Color WindowBack = Color.FromArgb(0x1E, 0x1E, 0x1E);
+    public static readonly Color WindowBack = Color.FromArgb(0x18, 0x18, 0x18);
     public static readonly Color PanelBack = Color.FromArgb(0x26, 0x26, 0x26);
     public static readonly Color WindowText = Color.FromArgb(0xE6, 0xE6, 0xE6);
     public static readonly Color MutedText = Color.FromArgb(0x9E, 0x9E, 0x9E);
+    public static readonly Color TileBack = Color.FromArgb(0x30, 0x30, 0x30);
     public static readonly Color Grid = Color.FromArgb(0x3A, 0x3A, 0x3A);
     public static readonly Color Banner = Color.FromArgb(0x5D, 0x40, 0x37);
 
