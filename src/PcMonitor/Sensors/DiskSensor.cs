@@ -1,7 +1,44 @@
 using System.Globalization;
+using PcMonitor.Model;
 using PcMonitor.Native;
 
 namespace PcMonitor.Sensors;
+
+/// <summary>Disk readings: throughput every call, NVMe temperature only on refresh (every 5 s), cached otherwise.</summary>
+public sealed class DiskSensor : IDisposable
+{
+    readonly IReadOnlyList<DiskInfo> _disks;
+    readonly DiskThroughput _throughput = new();
+    readonly (double? TempC, double? WarnC, double? CritC)[] _temps;
+    bool _tempsRead;
+
+    public DiskSensor(IReadOnlyList<DiskInfo> disks)
+    {
+        _disks = disks;
+        _temps = new (double?, double?, double?)[disks.Count];
+    }
+
+    public IReadOnlyList<DiskInfo> Disks => _disks;
+
+    public IReadOnlyList<DiskReading> Read(bool refreshTemps)
+    {
+        _throughput.Collect();
+        if (refreshTemps || !_tempsRead)
+        {
+            for (int i = 0; i < _disks.Count; i++) _temps[i] = NvmeTemperature.Query(_disks[i].DiskNumber);
+            _tempsRead = true;
+        }
+        var result = new DiskReading[_disks.Count];
+        for (int i = 0; i < _disks.Count; i++)
+        {
+            var (r, w, lat) = _throughput.Get(_disks[i].DiskNumber);
+            result[i] = new DiskReading(_disks[i], _temps[i].TempC, _temps[i].WarnC, _temps[i].CritC, r, w, lat);
+        }
+        return result;
+    }
+
+    public void Dispose() => _throughput.Dispose();
+}
 
 /// <summary>Per-disk throughput and latency from OS counters (no command reaches the disk).</summary>
 public sealed class DiskThroughput : IDisposable

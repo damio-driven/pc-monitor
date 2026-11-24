@@ -49,13 +49,18 @@ static partial class Program
         o.WriteLine();
         o.WriteLine($"PcMonitor probe  elevated={IsElevated()}  {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
 
+        var topology = DiskTopology.Discover();
         using var cpu = new CpuSensor();
         using var disks = new DiskThroughput();
+        using var diskSensor = new DiskSensor(topology);
         cpu.Read();
         disks.Collect();
+        diskSensor.Read(true);
         Thread.Sleep(1000);
         CpuReading r = cpu.Read();
         disks.Collect();
+        var diskReadings = diskSensor.Read(true);
+        var power = PowerSensor.Read(true);
 
         o.WriteLine($"ESIF available: {cpu.EsifAvailable}");
         o.WriteLine($"T1={F(r.T1)} T0={F(r.T0)} PackageW={F(r.PackageW)} IaW={F(r.IaW)}");
@@ -68,6 +73,9 @@ static partial class Program
             if (rd is null && wr is null && lat is null) continue;
             o.WriteLine($"Disk {n}: read={F(rd)} MB/s write={F(wr)} MB/s latency={F(lat)} ms");
         }
+        foreach (var d in diskReadings)
+            o.WriteLine($"{d.Info.Letter} disk {d.Info.DiskNumber} {d.Info.Model} endpoint={d.Info.Endpoint?.ToString() ?? "null"} rootport={d.Info.RootPort?.ToString() ?? "null"} temp={F(d.TempC)} warn={F(d.WarnC)} crit={F(d.CritC)} read={F(d.ReadMBs)} write={F(d.WriteMBs)} lat={F(d.LatencyMs)}");
+        o.WriteLine($"Power: onAc={power.OnAc?.ToString() ?? "null"} battery={power.BatteryPct?.ToString(CultureInfo.InvariantCulture) ?? "null"}% rate={F(power.RateW)} W");
         o.Flush();
         return 0;
     }
