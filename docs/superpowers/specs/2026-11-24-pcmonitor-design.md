@@ -185,7 +185,12 @@ Toast/balloon Windows solo quando inizia una raffica WHEA (>= 10 eventi in
   dell'implementazione: vedi Task 1 del piano).
 - .NET 10 (LTS), WinForms, `PublishSingleFile`, framework-dependent
   (runtime gia' presente) per restare piccolo.
-- Installazione: `C:\Users\Damio\AppData\Local\PcMonitor\PcMonitor.exe`.
+- Installazione: `C:\Eseguibili\_\PcMonitor\PcMonitor.exe`, cartella con ACL protetta
+  (scrivono solo SYSTEM e Administrators). Decisione dell'utente del 25/11/2026 dopo la
+  revisione di sicurezza: l'attivita' elevata non deve avviare un exe sostituibile senza
+  UAC (in origine era `%LOCALAPPDATA%\PcMonitor\`). Rischio residuo accettato:
+  `C:\Eseguibili\_` resta rinominabile senza UAC. I log restano in
+  `%LOCALAPPDATA%\PcMonitor\logs\`.
 
 ## Chiarimenti dopo la revisione (decisioni di Claude)
 

@@ -24,7 +24,7 @@
 - UI language Italian, dark theme. Missing value shown as `n/d` (window) and `--` (icon).
 - Target footprint: < 1% average CPU, ~40 MB private bytes with window closed. Window is disposed on close.
 - Errors in one source never stop other sources or the app.
-- Install path `%LOCALAPPDATA%\PcMonitor\PcMonitor.exe`; scheduled task name `PcMonitor`, at logon, highest privileges, 30 s delay.
+- Install path `C:\Eseguibili\_\PcMonitor\PcMonitor.exe` with a protected ACL (changed from `%LOCALAPPDATA%\PcMonitor\` after the final security review, user decision 25/11/2026); scheduled task name `PcMonitor`, at logon, highest privileges, 30 s delay.
 - Publish: framework-dependent, `PublishSingleFile=true`, win-x64.
 
 ## Review Focus
